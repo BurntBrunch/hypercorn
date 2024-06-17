@@ -3,6 +3,7 @@ from __future__ import annotations
 import platform
 import signal
 import time
+from copy import copy
 from multiprocessing import get_context
 from multiprocessing.connection import wait
 from multiprocessing.context import BaseContext
@@ -117,9 +118,21 @@ def _populate(
     ctx: BaseContext,
 ) -> None:
     for _ in range(config.workers - len(processes)):
+        # Recreate the inet sockets to correctly use SO_REUSEPORT.
+        # We need a unique socket per process for each AF_INET{,6} address,
+        # but we don't need to keep copies of them in the main process.
+        #
+        # Therefore, we shallow clone the Sockets object, reopen the inet sockets,
+        # fork a process that inherits them, then close the new sockets
+        # in the main process. Technically the fork _also_ inherits the
+        # original sockets but it doesn't know where they are.
+        #
+        proc_sockets = copy(sockets)
+        proc_sockets.reopen_inet_sockets()
+
         process = ctx.Process(  # type: ignore
             target=worker_func,
-            kwargs={"config": config, "shutdown_event": shutdown_event, "sockets": sockets},
+            kwargs={"config": config, "shutdown_event": shutdown_event, "sockets": proc_sockets},
         )
         process.daemon = True
         try:
@@ -131,6 +144,9 @@ def _populate(
         processes.append(process)
         if platform.system() == "Windows":
             time.sleep(0.1)
+
+        for socket in proc_sockets.inet_sockets:
+            socket.close()
 
 
 def _join_exited(processes: List[BaseProcess]) -> int:

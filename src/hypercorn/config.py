@@ -44,6 +44,55 @@ class Sockets:
     insecure_sockets: List[socket.socket]
     quic_sockets: List[socket.socket]
 
+    @property
+    def inet_sockets(self) -> List[socket.socket]:
+        inet_sockets = []
+        socket_sets = (self.secure_sockets, self.insecure_sockets, self.quic_sockets)
+
+        for socket_set in socket_sets:
+            for s in socket_set:
+                if s.family in (socket.AF_INET, socket.AF_INET6):
+                    inet_sockets.append(s)
+
+        return inet_sockets
+
+    def reopen_inet_sockets(self) -> List[socket.socket]:
+        """
+        Reopens all AF_INET and AF_INET6 sockets again and sets them up with
+        their sockopts as their originals.
+
+        The old sockets are _not_ closed as part of this function.
+        """
+        new_sockets: List[socket.socket] = []
+
+        # sockopts to copy
+        opts = (
+            (socket.IPPROTO_TCP, socket.TCP_NODELAY),
+            (socket.SOL_SOCKET, socket.SO_REUSEADDR),
+            (socket.SOL_SOCKET, socket.SO_REUSEPORT),
+        )
+
+        replaced_sockets = set()
+
+        for s in self.inet_sockets:
+            new_sock = socket.socket(s.family, s.type)
+            new_sock.setblocking(s.getblocking())
+            for opt in opts:
+                new_sock.setsockopt(*opt, s.getsockopt(*opt))
+
+            new_sockets.append(new_sock)
+
+            for sock_set in (self.secure_sockets, self.insecure_sockets, self.quic_sockets):
+                if s in sock_set:
+                    sock_set.append(new_sock)
+                    replaced_sockets.add(s)
+
+        self.secure_sockets = [s for s in self.secure_sockets if s not in replaced_sockets]
+        self.insecure_sockets = [s for s in self.insecure_sockets if s not in replaced_sockets]
+        self.quic_sockets = [s for s in self.quic_sockets if s not in replaced_sockets]
+
+        return new_sockets
+
 
 class SocketTypeError(Exception):
     def __init__(self, expected: SocketKind, actual: SocketKind) -> None:
